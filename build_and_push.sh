@@ -8,8 +8,8 @@ echo "Building $TAG"
 echo "Building $LATEST"
 echo "Build timestamp: $BUILD_TIMESTAMP"
 
-# First time only
-sudo docker buildx create --name pcmbuilder --platform linux/arm64,linux/amd64 --driver-opt network=host --use --buildkitd-flags '--allow-insecure-entitlement security.insecure'
+# First build (multi arch, first time only)
+#sudo docker buildx create --name pcmbuilder --platform linux/arm64,linux/amd64 --driver-opt network=host --use --buildkitd-flags '--allow-insecure-entitlement security.insecure'
 
 # Each time
 export CR_PAT=''

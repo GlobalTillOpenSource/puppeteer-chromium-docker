@@ -1,6 +1,6 @@
 ARG ARCH=
-ARG NODE_VERSION=16
-FROM ${ARCH}node:${NODE_VERSION}-bullseye-slim AS prep-stage
+ARG NODE_VERSION=18
+FROM ${ARCH}node:${NODE_VERSION}-bullseye-slim
 
 LABEL maintainer="dev@ops.globaltill.com"
 LABEL Description="Multiarch image for Puppeteer using headless Chromium"
@@ -12,13 +12,24 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 LABEL org.opencontainers.image.vendor="GlobalTill OSS"
 LABEL org.opencontainers.image.authors="GlobalTill DevOps"
 
-ARG PUPPETEER_SKIP_DOWNLOAD=true
-ARG NODE_ENV=production
+ARG DEFAULT_PUPPETEER_SKIP_DOWNLOAD=true
+ENV PUPPETEER_SKIP_DOWNLOAD=$DEFAULT_PUPPETEER_SKIP_DOWNLOAD
+
+ARG DEFAULT_NODE_ENV=true
+ENV NODE_ENV=$DEFAULT_NODE_ENV
+
+ARG DEFAULT_USER=npcuser
+ENV USER=$DEFAULT_USER
+
+ARG DEFAULT_PUPPETEER_EXECUTABLE_PATH="/usr/lib/chromium/chromium"
+ENV PUPPETEER_EXECUTABLE_PATH=$DEFAULT_PUPPETEER_EXECUTABLE_PATH
+
 
 COPY 01_nodoc /etc/dpkg/dpkg.cfg.d/
 
+
 # Install latest Chrome dev packages and select fonts
-RUN set -ex \
+RUN set -eux \
     && sh -c 'echo "deb http://deb.debian.org/debian bullseye main contrib non-free" > /etc/apt/sources.list' \
     && sh -c 'echo "deb http://deb.debian.org/debian bullseye-updates main contrib non-free" >> /etc/apt/sources.list' \
     && sh -c 'echo "deb http://security.debian.org/debian-security/ bullseye-security main contrib non-free" >> /etc/apt/sources.list' \
@@ -35,52 +46,60 @@ RUN set -ex \
     lsb-release \
     procps \
     xdg-utils \
+    xauth \
     xvfb \
+    xorg \
+    dbus-x11 \
     chromium \
+    chromium-sandbox \
     && apt-get -y clean \
     && rm -rf /var/lib/apt/lists/* \
     && rm -rf /src/*.deb \
     && mkdir -p /tmp/.X11-unix \
     && chmod 1777 /tmp/.X11-unix
 
-RUN echo $(dpkg -L chromium)
-RUN echo $(/usr/bin/chromium --version)
-
-# Prepare to install the latest Chrome compatible
-RUN mkdir -p /tmp/install
-WORKDIR /tmp/install
-# COPY package.json puppeteer_*.js /tmp/install/
-
-
 # TODO npm version needs to be templated
 RUN npm config --global set update-notifier false \
     && npm config --global set progress false \
     && npm install -g npm@9.5.1
 
+RUN mkdir -p /tmp/build
+WORKDIR /tmp/build
 
-# Copy source code and xvfb script
-
-FROM prep-stage as run-stage
+COPY package.json puppeteer_*.js /tmp/build/
 
 # Add user so we don't need --no-sandbox.
-RUN groupadd -r npcuser && useradd -r -g npcuser -G audio,video npcuser \
-    && mkdir -p /home/npcuser/Downloads \
-    && chown -R npcuser:npcuser /home/npcuser
+RUN groupadd -r $USER && useradd -r -g $USER -G audio,video $USER \
+    && mkdir -p /home/$USER/Downloads \
+    && chown -R $USER:$USER /home/$USER
 
-COPY --chown=npcuser:npcuser package.json puppeteer_*.js start_xvfb_and_run_cmd.sh healthcheck.js /home/npcuser/
 
-# Run everything after as non-privileged user (npcuser)
-USER npcuser
-WORKDIR /home/npcuser
+# Copy just package.json and package-lock.json
+# to speed up the build using Docker layer cache.
+COPY --chown=$USER package*.json ./
+
+# Install default dependencies
+RUN npm --quiet set progress=false \
+    && npm install --only=prod --no-optional --no-package-lock --prefer-online --audit=false
+
+# Run everything after as non-privileged user ($USER)
+USER $USER
+WORKDIR /home/$USER
+
+# Copy source code and xvfb script
+COPY --chown=$USER:$USER package.json puppeteer_*.js start_xvfb_and_run_cmd.sh /home/$USER/
+
+# We use wildcards so Docker doesn't get annoyed when a file doesn't exist. And
+# we make sure there's always at least one file copied, otherwise the `docker
+# build` fails.
+# COPY requirements.tx[t] pyproject.tom[l] poetry.loc[k] Pipfile* \
+#      dev-requirements.tx[t] \
+#      docker-shared/install-py-dependencies.py \
+#      docker-config/custom-install-py-dependencies.sh \
+#      ./
 
 # As of February 2023 there is no arm64 chromium build, so we need to skip the download.
-ARG PUPPETEER_SKIP_DOWNLOlsAD=true
-
-# Path to Chromium/Chrome executable, used by launchPuppeteer()
-ARG PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
-
-# Tell Node this is a production environemnt
-ENV NODE_ENV=production
+ARG PUPPETEER_SKIP_DOWNLOAD=true
 
 # max-old-space-size (64-bit systems)
 
@@ -112,16 +131,13 @@ ENV NODE_ENV=production
 # for requests received by this server, i.e. the maximum length of request headers in bytes.
 
 # Set Node memory limit 32 GB and max http header size 64 KB
-ENV NODE_OPTIONS="--max-old-space-size=32768 --max-http-header-size=65536"
+ARG DEFAULT_NODE_OPTIONS="--max-old-space-size=32768 --max-http-header-size=65536"
+ENV NODE_OPTIONS=$DEFAULT_NODE_OPTIONS
 
-# COPY  --from=builder --chown=npcuser:npcuser package.json puppeteer_*.js start_xvfb_and_run_cmd.sh healthcheck.js /home/npcuser/
-# COPY --chown=npcuser:npcuser package.json puppeteer_*.js start_xvfb_and_run_cmd.sh healthcheck.js /home/npcuser/
-
-RUN mkdir -p /home/npcuser/.config/chromium/Crash Reports/pending
+COPY --chown=$USER:$USER package*.json puppeteer_*.js start_xvfb_and_run_cmd.sh /home/$USER/
 
 # Install all dependencies. Don't audit to speed up the installation.
-RUN npm --quiet set progress=false \
-    && npm install --omit=dev --omit=optional --audit=false --prefer-online --no-package-lock \
+RUN npm install --omit=dev --omit=optional --audit=false --prefer-online --no-package-lock \
     && echo "Installed NPM packages:" \
     && (npm list --omit=dev --all || true) \
     && echo "Node version:" \
@@ -135,17 +151,16 @@ RUN npm --quiet set progress=false \
     && cat /etc/debian_version \
     && echo "Debian release info:" \
     && echo $(lsb_release -a) \
+    && echo "Chromium version:" \
+    && bash -c "$PUPPETEER_EXECUTABLE_PATH --version" \
     && npm cache clean --force \
     && rm -r ~/.npm
-
 
 # Set up xvfb
 ENV DISPLAY=:99
 ENV XVFB_WHD=1920x1080x24+32
 
-# Using CMD instead of ENTRYPOINT, to allow manual overriding.
-CMD ["/home/npcuser/start_xvfb_and_run_cmd.sh", "node", "src/main.js" ]
+RUN chmod +x start_xvfb_and_run_cmd.sh
 
-# https://adambrodziak.pl/dockerfile-good-practices-for-node-and-npm
-# Execute NodeJS (not NPM script) to handle SIGTERM and SIGINT signals.
-# CMD ["node", "./src/index.js"]
+
+CMD ./start_xvfb_and_run_cmd.sh node src/main.js
